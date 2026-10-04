@@ -19,6 +19,18 @@ The Supabase project URL is provided in `.env.example`; copy the project's publi
 
 In the Supabase Dashboard, open **Authentication → URL Configuration** and add `http://localhost:5173` as a Site URL and redirect URL. Auth email confirmation is enabled by default: users confirm the signup email, then sign in. Add the production HTTPS URL there when deploying.
 
+## Deploying the full app
+
+Vercel currently serves the Vite frontend only. The Express API must also be deployed to a Node 22.9+ host with a persistent disk for SQLite. Set these variables in Vercel for the frontend and redeploy:
+
+| Vercel variable | Value |
+| --- | --- |
+| `VITE_SUPABASE_URL` | `https://cxbdajqagwmmwzcwqwfx.supabase.co` |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | The project's publishable key from Supabase **Settings → API Keys** |
+| `VITE_API_URL` | The deployed API base URL ending in `/api` |
+
+Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `DATABASE_PATH` (on the persistent disk), `ADMIN_EMAIL`, and `ADMIN_PASSWORD` on the API host. In Supabase **Authentication → URL Configuration**, set the Vercel URL as the Site URL and add it to Redirect URLs. The API cannot use `localhost` from a deployed browser.
+
 ```powershell
 npm run dev
 ```
