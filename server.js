@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { DatabaseSync as Database } from 'node:sqlite';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import { createClient } from '@supabase/supabase-js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -14,7 +14,7 @@ fs.mkdirSync(path.dirname(path.resolve(dataPath)), { recursive: true });
 const db = new Database(dataPath);
 db.exec('PRAGMA journal_mode = WAL');
 db.exec(`
-CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','mechanic','admin')), address TEXT DEFAULT '', vehicle TEXT DEFAULT '', registration TEXT DEFAULT '', garage TEXT DEFAULT '', services TEXT DEFAULT '', radius REAL DEFAULT 15, lat REAL, lng REAL, available INTEGER DEFAULT 0, verified INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, auth_uid TEXT UNIQUE, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, phone TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','mechanic','admin')), address TEXT DEFAULT '', vehicle TEXT DEFAULT '', registration TEXT DEFAULT '', garage TEXT DEFAULT '', services TEXT DEFAULT '', radius REAL DEFAULT 15, lat REAL, lng REAL, available INTEGER DEFAULT 0, verified INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, phone TEXT NOT NULL, relationship TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), mechanic_id INTEGER REFERENCES users(id), type TEXT NOT NULL, description TEXT DEFAULT '', lat REAL, lng REAL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS sos (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), lat REAL, lng REAL, accuracy REAL, status TEXT DEFAULT 'active', created_at TEXT DEFAULT CURRENT_TIMESTAMP, synced_at TEXT);
@@ -23,8 +23,12 @@ CREATE INDEX IF NOT EXISTS requests_user_created ON requests(user_id, created_at
 CREATE INDEX IF NOT EXISTS requests_mechanic_status ON requests(mechanic_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS sos_created ON sos(created_at DESC);
 `);
-if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) throw new Error('Set JWT_SECRET before running in production.');
-const secret = process.env.JWT_SECRET || 'dev-only-change-this-road-sos-secret';
+// Preserve existing SQLite accounts while attaching Supabase identities on first sign-in.
+if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'auth_uid')) db.exec('ALTER TABLE users ADD COLUMN auth_uid TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_auth_uid ON users(auth_uid) WHERE auth_uid IS NOT NULL');
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+const supabaseAuth = supabaseUrl && supabasePublishableKey ? createClient(supabaseUrl, supabasePublishableKey, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
 // Optional first-run admin provisioning; never overwrite an existing account.
 if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
   const email = process.env.ADMIN_EMAIL.trim().toLowerCase();
@@ -34,15 +38,45 @@ if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
       .run(process.env.ADMIN_NAME || 'Road SOS Admin', email, process.env.ADMIN_PHONE || 'Not provided', await bcrypt.hash(process.env.ADMIN_PASSWORD, 12));
   }
 }
-const tokenFor = u => jwt.sign({ id: u.id, role: u.role }, secret, { expiresIn: '7d' });
-function auth(req,res,next){const t=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');try{req.identity=jwt.verify(t,secret);next()}catch{return res.status(401).json({error:'Please sign in to continue.'})}}
+function auth(req,res,next){
+  const t=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');
+  if(!supabaseAuth)return res.status(503).json({error:'Supabase Auth is not configured on the API.'});
+  if(!t)return res.status(401).json({error:'Please sign in to continue.'});
+  supabaseAuth.auth.getUser(t).then(({data,error})=>{
+    if(error||!data.user)return res.status(401).json({error:'Your session is invalid or expired. Please sign in again.'});
+    const identity=data.user,email=String(identity.email||'').trim().toLowerCase();
+    if(!email||!identity.email_confirmed_at)return res.status(403).json({error:'Confirm your email address before using Road SOS.'});
+    let row=db.prepare('SELECT * FROM users WHERE auth_uid=?').get(identity.id);
+    if(!row){
+      row=db.prepare('SELECT * FROM users WHERE email=?').get(email);
+      if(row){
+        if(row.auth_uid&&row.auth_uid!==identity.id)return res.status(409).json({error:'This account is already linked to another sign-in.'});
+        db.prepare('UPDATE users SET auth_uid=? WHERE id=?').run(identity.id,row.id);
+        row=db.prepare('SELECT * FROM users WHERE id=?').get(row.id);
+      }else{
+        const meta=identity.user_metadata||{};
+        const r=['mechanic','user'].includes(meta.role)?meta.role:'user';
+        const name=String(meta.name||email.split('@')[0]).trim().slice(0,100)||'Road SOS member';
+        const phone=String(meta.phone||'Not provided').trim().slice(0,40);
+        try{
+          db.prepare('INSERT OR IGNORE INTO users(auth_uid,name,email,phone,password_hash,role,address,vehicle,registration,garage,services,radius) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(identity.id,name,email,phone,'supabase-auth-managed',r,String(meta.address||''),String(meta.vehicle||''),String(meta.registration||''),String(meta.garage||''),String(meta.services||''),Math.max(1,Math.min(200,Number(meta.radius)||15)));
+          row=db.prepare('SELECT * FROM users WHERE auth_uid=?').get(identity.id);
+          if(!row){
+            row=db.prepare('SELECT * FROM users WHERE email=?').get(email);
+            if(row&&!row.auth_uid){db.prepare('UPDATE users SET auth_uid=? WHERE id=?').run(identity.id,row.id);row=db.prepare('SELECT * FROM users WHERE id=?').get(row.id)}
+          }
+        }catch(e){console.error(e);return res.status(409).json({error:'Could not create your Road SOS profile. Contact an administrator.'})}
+      }
+    }
+    if(!row)return res.status(409).json({error:'This email is already linked to another Road SOS sign-in.'});
+    req.identity={id:row.id,role:row.role};req.roadUser=row;req.authUser=identity;next();
+  }).catch(error=>{console.error('Supabase token verification failed:',error);res.status(503).json({error:'Could not verify your session right now.'})});
+}
 function role(...roles){return (req,res,next)=>roles.includes(req.identity.role)?next():res.status(403).json({error:'This area is not available for your account.'})}
 function wrap(fn){return (req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next)}
 function publicUser(id){return db.prepare('SELECT id,name,email,phone,role,address,vehicle,registration,garage,services,radius,lat,lng,available,verified,created_at FROM users WHERE id=?').get(id)}
 const distance=(a,b,c,d)=>{const rad=x=>x*Math.PI/180,R=6371,dl=rad(c-a),dn=rad(d-b),h=Math.sin(dl/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dn/2)**2;return R*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h))};
 app.get('/api/health',(req,res)=>res.json({ok:true,service:'road-sos'}));
-app.post('/api/auth/register',wrap(async(req,res)=>{const {name,email,phone,password,role:r='user',address='',vehicle='',registration='',garage='',services='',radius=15,lat=null,lng=null,contacts=[]}=req.body||{};if(!name?.trim()||!/^\S+@\S+\.\S+$/.test(email||'')||!phone?.trim()||typeof password!=='string'||password.length<8||!['user','mechanic'].includes(r))return res.status(400).json({error:'Enter a name, valid email, phone and password with at least 8 characters.'});if(r==='mechanic'&&!garage?.trim())return res.status(400).json({error:'A garage or business name is required for mechanic accounts.'});const hash=await bcrypt.hash(password,12);let info;try{info=db.prepare('INSERT INTO users(name,email,phone,password_hash,role,address,vehicle,registration,garage,services,radius,lat,lng) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(name.trim(),email.trim().toLowerCase(),phone.trim(),hash,r,address,vehicle,registration,garage,services,Math.max(1,Math.min(200,Number(radius)||15)),lat,lng)}catch(e){if(String(e.code).includes('CONSTRAINT'))return res.status(409).json({error:'An account already uses this email.'});throw e}const uid=Number(info.lastInsertRowid);if(r==='user'&&Array.isArray(contacts))for(const c of contacts.slice(0,2))if(c.name?.trim()&&c.phone?.trim())db.prepare('INSERT INTO contacts(user_id,name,phone,relationship) VALUES(?,?,?,?)').run(uid,c.name.trim(),c.phone.trim(),String(c.relationship||''));const user=publicUser(uid);res.status(201).json({token:tokenFor(user),user})}));
-app.post('/api/auth/login',wrap(async(req,res)=>{const {email,password,role:r}=req.body||{};const u=db.prepare('SELECT * FROM users WHERE email=?').get(String(email||'').toLowerCase().trim());if(!u||!await bcrypt.compare(password||'',u.password_hash)||r&&r!==u.role)return res.status(401).json({error:'Email, password or account type is incorrect.'});res.json({token:tokenFor(u),user:publicUser(u.id)})}));
 app.get('/api/me',auth,wrap((req,res)=>{const u=publicUser(req.identity.id);if(!u)return res.status(401).json({error:'Account no longer exists.'});res.json({user:u})}));
 app.put('/api/me',auth,wrap((req,res)=>{const {name,phone,address,vehicle,registration,garage,services,radius,lat,lng}=req.body||{};db.prepare('UPDATE users SET name=COALESCE(?,name),phone=COALESCE(?,phone),address=COALESCE(?,address),vehicle=COALESCE(?,vehicle),registration=COALESCE(?,registration),garage=COALESCE(?,garage),services=COALESCE(?,services),radius=COALESCE(?,radius),lat=COALESCE(?,lat),lng=COALESCE(?,lng) WHERE id=?').run(name,phone,address,vehicle,registration,garage,services,radius,lat,lng,req.identity.id);res.json({user:publicUser(req.identity.id)})}));
 app.get('/api/contacts',auth,role('user','admin'),(req,res)=>res.json({contacts:db.prepare('SELECT id,name,phone,relationship FROM contacts WHERE user_id=?').all(req.identity.id)}));

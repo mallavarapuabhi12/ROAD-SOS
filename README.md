@@ -15,7 +15,9 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and set a unique `JWT_SECRET` (at least 32 random characters). Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` (at least 8 characters) to provision the administrator if the email is not already present. The app never overwrites an existing account. Keep `.env` private.
+The Supabase project URL is provided in `.env.example`; copy the project's publishable key from the Supabase API Keys page into the placeholder in that file. Keep it in `VITE_SUPABASE_PUBLISHABLE_KEY` (it is designed for browser use); never put a Supabase secret or service-role key in the client. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` to provision the administrator profile in the local SQLite database. Keep `.env` private.
+
+In the Supabase Dashboard, open **Authentication → URL Configuration** and add `http://localhost:5173` as a Site URL and redirect URL. Auth email confirmation is enabled by default: users confirm the signup email, then sign in. Add the production HTTPS URL there when deploying.
 
 ```powershell
 npm run dev
@@ -35,7 +37,7 @@ npm start
 
 - **Driver:** register, maintain vehicle details and emergency contacts, share current GPS coordinates, find verified and available mechanics within their stated service radius, send and follow a roadside request, submit a rating, and create SOS alerts.
 - **Mechanic:** register a garage profile, wait for admin verification, share a current location and go online, review incoming jobs, and update accepted jobs through on-the-way, arrived, in-progress, and completed.
-- **Admin:** provision credentials through environment variables, review and verify mechanics, inspect user/request/SOS counts, and view recent SOS activity and assistance requests.
+- **Admin:** provision an administrator profile through environment variables, then create its Supabase Auth login using the same email (select Admin on the registration screen). Only an email matching the pre-provisioned admin profile receives the admin role; role selection and Supabase user metadata cannot grant admin permissions. Review and verify mechanics, inspect user/request/SOS counts, and view recent SOS activity and assistance requests.
 
 The SOS action asks for confirmation. Online alerts are stored by the server. If the browser is offline or the request loses network connectivity, the alert is queued in IndexedDB and retried when connectivity returns. The application does not claim to send an SMS or contact emergency services. Call local emergency services for immediate danger.
 
@@ -46,7 +48,7 @@ All endpoints are under `/api`. Protected routes require `Authorization: Bearer 
 | Area | Endpoints |
 | --- | --- |
 | Status | `GET /health` |
-| Authentication | `POST /auth/register`, `POST /auth/login`, `GET /me`, `PUT /me` |
+| Authentication | Supabase Auth signup/signin/signout, `GET /me`, `PUT /me` |
 | Contacts | `GET /contacts`, `PUT /contacts` |
 | Mechanics | `GET /mechanics?lat=…&lng=…`, `POST /mechanic/availability` |
 | Requests | `POST /requests`, `GET /requests`, `PATCH /requests/:id/status`, `POST /requests/:id/rating` |
@@ -58,7 +60,7 @@ All endpoints are under `/api`. Protected routes require `Authorization: Bearer 
 - The landing page and dashboards use a warm paper palette, deep slate typography, a restrained road-orange SOS accent, and custom responsive layouts.
 - The browser Geolocation API supplies actual coordinates; the UI reports permission, availability, and timeout errors rather than inventing a location.
 - Leaflet renders an OpenStreetMap view. Mechanic distance is calculated from coordinates, and only verified, online mechanics inside their declared service radius appear in driver search.
-- Passwords are hashed with bcrypt. API roles are checked server-side, request state changes follow an allowed transition table, and database operations use parameterized SQL.
+- Supabase Auth manages passwords and browser sessions. Express verifies every bearer token with Supabase Auth and reads authorization roles from the trusted SQLite profile. Supabase `user_metadata` is used only for initial driver/mechanic profile details; it cannot grant admin access. Existing SQLite accounts are preserved and linked by authenticated email at first sign-in.
 - `npm test` starts a temporary API/database and checks account flows, contacts, mechanic verification/availability, assistance states, rating, SOS storage, and role authorization. Test data is removed after the run.
 
 ## Environment variables
@@ -66,9 +68,12 @@ All endpoints are under `/api`. Protected routes require `Authorization: Bearer 
 | Variable | Purpose |
 | --- | --- |
 | `PORT` | API and production web port (default `4000`) |
-| `JWT_SECRET` | Signing key for session tokens; set a unique secret |
 | `DATABASE_PATH` | SQLite database path (default `./data/roadsos.db`) |
 | `VITE_API_URL` | API URL for the Vite client (default `http://localhost:4000/api`) |
+| `VITE_SUPABASE_URL` | Supabase project URL used by the browser |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key used by the browser |
+| `SUPABASE_URL` | Supabase project URL used by the API |
+| `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key used by the API token verifier |
 | `ADMIN_EMAIL` | Optional first-run admin email |
 | `ADMIN_PASSWORD` | Optional first-run admin password (minimum 8 characters) |
 | `ADMIN_NAME` | Optional admin display name |
@@ -76,7 +81,7 @@ All endpoints are under `/api`. Protected routes require `Authorization: Bearer 
 
 ## Current limits
 
-- Mechanic verification is manual. Admin credentials must be provisioned through environment variables before first startup.
+- Mechanic verification is manual. Admin profile credentials must be provisioned in the local environment before first startup, and a matching Supabase Auth user must be created before the administrator can sign in.
 - Status updates appear when the client refreshes its request data; there are no push notifications or live mechanic tracking.
 - SOS records are visible in the admin dashboard, but the app does not dispatch SMS, phone calls, or third-party emergency notifications.
 - Location access requires browser permission and, outside localhost, a secure HTTPS origin. OpenStreetMap map tiles require network access.
