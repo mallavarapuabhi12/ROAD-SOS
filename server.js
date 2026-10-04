@@ -96,4 +96,8 @@ app.patch('/api/admin/mechanics/:id/verify',auth,role('admin'),wrap((req,res)=>{
 const webDist=path.resolve('dist');
 if(fs.existsSync(webDist)){app.use(express.static(webDist));app.get('*',(req,res,next)=>req.path.startsWith('/api/')?next():res.sendFile(path.join(webDist,'index.html')))}
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Something went wrong. Please try again.'})});
-const port=Number(process.env.PORT)||4000;app.listen(port,()=>console.log(`Road SOS API listening on http://localhost:${port}`));
+const port = Number(process.env.PORT) || 4000;
+
+app.listen(port, "0.0.0.0", () => {
+  console.log(`Road SOS API listening on port ${port}`);
+});
