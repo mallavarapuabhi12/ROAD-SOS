@@ -31,6 +31,8 @@ Vercel currently serves the Vite frontend only. The Express API must also be dep
 
 Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `DATABASE_PATH` (on the persistent disk), `ADMIN_EMAIL`, and `ADMIN_PASSWORD` on the API host. In Supabase **Authentication → URL Configuration**, set the Vercel URL as the Site URL and add it to Redirect URLs. The API cannot use `localhost` from a deployed browser.
 
+To check the API deployment, open `https://<your-api-host>/api/health`; it should return `{"ok":true,"service":"road-sos"}`. If the website reports that it cannot reach the API, make sure Vercel's `VITE_API_URL` is `https://<your-api-host>/api` (not the Vercel website URL and not `localhost`), then redeploy the frontend. The Express service must be running and reachable over HTTPS.
+
 ```powershell
 npm run dev
 ```
